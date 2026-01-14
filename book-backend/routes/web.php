@@ -130,3 +130,11 @@ Route::get('/__setup-now', function () {
     Artisan::call('db:seed');
     return 'Migration & seeding done';
 });
+
+
+
+
+Route::get('/__clear', function () {
+    Artisan::call('optimize:clear');
+    return 'Config cleared';
+});
