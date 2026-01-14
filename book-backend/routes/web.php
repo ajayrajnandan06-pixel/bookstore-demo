@@ -124,7 +124,8 @@ Route::get('/debug-razorpay', function() {
 
 use Illuminate\Support\Facades\Artisan;
 
-Route::get('/__setup', function () {
+Route::get('/__setup-now', function () {
+    Artisan::call('optimize:clear');
     Artisan::call('migrate --force');
     Artisan::call('db:seed');
     return 'Migration & seeding done';
