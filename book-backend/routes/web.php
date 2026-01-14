@@ -121,3 +121,11 @@ Route::get('/debug-razorpay', function() {
         ], 500);
     }
 });
+
+use Illuminate\Support\Facades\Artisan;
+
+Route::get('/__setup', function () {
+    Artisan::call('migrate --force');
+    Artisan::call('db:seed');
+    return 'Migration & seeding done';
+});
