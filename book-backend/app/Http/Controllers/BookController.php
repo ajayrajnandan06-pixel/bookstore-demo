@@ -113,4 +113,27 @@ class BookController extends Controller
         return redirect()->route('books.index')
             ->with('success', 'Book deleted successfully!');
     }
+    /**
+ * Search books (AJAX autocomplete)
+ */
+public function search(Request $request)
+{
+    $query = $request->input('q', '');
+    
+    if (strlen($query) < 2) {
+        return response()->json([]);
+    }
+    
+    $books = Book::where(function($q) use ($query) {
+            $q->where('title', 'like', "%{$query}%")
+              ->orWhere('author', 'like', "%{$query}%")
+              ->orWhere('isbn', 'like', "%{$query}%");
+        })
+        ->where('quantity', '>', 0)
+        ->select('id', 'title', 'author', 'price', 'quantity', 'isbn')
+        ->limit(10)
+        ->get();
+    
+    return response()->json($books);
+}
 }

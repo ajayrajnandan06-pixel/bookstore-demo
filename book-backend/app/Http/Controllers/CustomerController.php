@@ -111,4 +111,26 @@ class CustomerController extends Controller
         return redirect()->route('customers.index')
             ->with('success', 'Customer deleted successfully!');
     }
+    /**
+ * Search customers (AJAX autocomplete)
+ */
+public function search(Request $request)
+{
+    $query = $request->input('q', '');
+    
+    if (strlen($query) < 2) {
+        return response()->json([]);
+    }
+    
+    $customers = Customer::where(function($q) use ($query) {
+            $q->where('name', 'like', "%{$query}%")
+              ->orWhere('email', 'like', "%{$query}%")
+              ->orWhere('phone', 'like', "%{$query}%");
+        })
+        ->select('id', 'name', 'email', 'phone', 'address')
+        ->limit(10)
+        ->get();
+    
+    return response()->json($customers);
+}
 }

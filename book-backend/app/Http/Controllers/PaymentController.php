@@ -7,21 +7,27 @@ use App\Models\Payment;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Str;
 use Razorpay\Api\Api;
-use Exception;
 
 class PaymentController extends Controller
 {
     /**
-     * Show payment page for order
+     * Show payment page - OPTIMIZED
      */
     public function create(Order $order)
     {
-        $order->load('customer', 'items.book', 'payments');
+        $order->load([
+            'customer:id,name,email,phone',
+            'items:id,order_id,book_id,quantity,price,total',
+            'items.book:id,title',
+            'payments:id,order_id,amount,status,method,created_at'
+        ]);
         
-        // Check if order is already paid
         if ($order->isFullyPaid()) {
-            return redirect()->route('orders.show', $order)
+            return redirect()
+                ->route('orders.show', $order)
                 ->with('info', 'Order is already fully paid.');
         }
         
@@ -29,113 +35,115 @@ class PaymentController extends Controller
     }
 
     /**
-     * Process payment
+     * Process payment - OPTIMIZED
      */
     public function store(Request $request, Order $order)
     {
         $request->validate([
             'method' => 'required|in:cash,card,online,bank_transfer',
             'amount' => 'required|numeric|min:0.01|max:' . $order->due_amount,
-            'gateway' => 'nullable|required_if:method,online|in:razorpay', // Removed stripe, paypal
+            'gateway' => 'nullable|required_if:method,online|in:razorpay',
             'notes' => 'nullable|string'
         ]);
 
-        DB::beginTransaction();
-
         try {
-            // Handle different payment methods
-            switch ($request->method) {
-                case 'online':
-                    return $this->processOnlinePayment($order, $request);
-                case 'card':
-                    return $this->processCardPayment($order, $request);
-                case 'bank_transfer':
-                    return $this->processBankTransfer($order, $request);
-                default:
-                    return $this->processCashPayment($order, $request);
-            }
-            
+            return DB::transaction(function () use ($order, $request) {
+                switch ($request->method) {
+                    case 'online':
+                        return $this->processOnlinePayment($order, $request);
+                    case 'card':
+                        return $this->processCardPayment($order, $request);
+                    case 'bank_transfer':
+                        return $this->processBankTransfer($order, $request);
+                    default:
+                        return $this->processCashPayment($order, $request);
+                }
+            });
         } catch (\Exception $e) {
-            DB::rollBack();
-            return back()->with('error', 'Payment failed: ' . $e->getMessage())->withInput();
+            Log::error('Payment processing failed', [
+                'order_id' => $order->id,
+                'error' => $e->getMessage()
+            ]);
+            
+            return back()
+                ->with('error', 'Payment failed: ' . $e->getMessage())
+                ->withInput();
         }
     }
 
     /**
-     * Process cash payment
+     * Process cash payment - OPTIMIZED
      */
     private function processCashPayment($order, $request)
     {
-        // Create cash payment record
         $payment = $order->recordPayment([
             'amount' => $request->amount,
             'method' => 'cash',
             'status' => 'completed',
+            'paid_at' => now(),
             'notes' => $request->notes
         ]);
 
-        DB::commit();
+        // Clear dashboard cache
+        Cache::forget('dashboard.stats');
+        Cache::forget('dashboard.recent_orders');
 
-        return redirect()->route('orders.show', $order)
+        return redirect()
+            ->route('orders.show', $order)
             ->with('success', 'Cash payment recorded successfully!');
     }
 
     /**
-     * Process card payment (manual entry for now)
+     * Process card payment - OPTIMIZED
      */
     private function processCardPayment($order, $request)
     {
-        // For manual card entry (like via terminal)
         $payment = $order->recordPayment([
             'amount' => $request->amount,
             'method' => 'card',
             'status' => 'completed',
-            'notes' => $request->notes . ' | Manual card payment'
+            'paid_at' => now(),
+            'notes' => ($request->notes ?? '') . ' | Manual card payment'
         ]);
 
-        DB::commit();
+        Cache::forget('dashboard.stats');
 
-        return redirect()->route('orders.show', $order)
+        return redirect()
+            ->route('orders.show', $order)
             ->with('success', 'Card payment recorded successfully!');
     }
 
     /**
-     * Process bank transfer
+     * Process bank transfer - OPTIMIZED
      */
     private function processBankTransfer($order, $request)
     {
-        // Bank transfer - mark as pending until verified
         $payment = $order->recordPayment([
             'amount' => $request->amount,
             'method' => 'bank_transfer',
             'status' => 'pending',
-            'notes' => $request->notes . ' | Bank transfer - pending verification'
+            'notes' => ($request->notes ?? '') . ' | Bank transfer - pending verification'
         ]);
 
-        DB::commit();
-
-        return redirect()->route('orders.show', $order)
+        return redirect()
+            ->route('orders.show', $order)
             ->with('warning', 'Bank transfer recorded. Status: Pending verification.');
     }
 
     /**
-     * Process online payment - show gateway options
+     * Process online payment - OPTIMIZED
      */
     private function processOnlinePayment($order, $request)
     {
-        $gateway = $request->gateway;
-        
-        // Only Razorpay remains
-        switch ($gateway) {
-            case 'razorpay':
-                return $this->initiateRazorpayPayment($order, $request);
-            default:
-                return back()->with('error', 'Invalid payment gateway selected.');
+        if ($request->gateway === 'razorpay') {
+            return $this->initiateRazorpayPayment($order, $request);
         }
+        
+        return back()->with('error', 'Invalid payment gateway selected.');
     }
 
     /**
-     * Create Razorpay order (API Endpoint)
+     * Create Razorpay order - OPTIMIZED with atomic operations
      */
     public function createRazorpayOrder(Request $request, Order $order)
     {
@@ -149,10 +157,12 @@ class PaymentController extends Controller
                 config('services.razorpay.secret')
             );
 
-            // Create Razorpay order
+            // Create Razorpay order with idempotency
+            $receiptId = $order->order_number . '_' . time() . '_' . Str::random(4);
+            
             $razorpayOrder = $api->order->create([
-                'receipt' => $order->order_number . '_' . time(),
-                'amount' => $request->amount * 100, // Convert to paise
+                'receipt' => $receiptId,
+                'amount' => $request->amount * 100,
                 'currency' => 'INR',
                 'payment_capture' => 1,
                 'notes' => [
@@ -161,17 +171,19 @@ class PaymentController extends Controller
                 ]
             ]);
 
-            // Create pending payment record
-            $payment = Payment::create([
-                'order_id' => $order->id,
-                'amount' => $request->amount,
-                'method' => 'online',
-                'gateway' => 'razorpay',
-                'transaction_id' => $razorpayOrder->id,
-                'status' => 'pending',
-                'gateway_response' => $razorpayOrder->toArray(),
-                'notes' => $request->notes ?? null
-            ]);
+            // OPTIMIZATION: Create payment record in single transaction
+            $payment = DB::transaction(function () use ($order, $request, $razorpayOrder) {
+                return Payment::create([
+                    'order_id' => $order->id,
+                    'amount' => $request->amount,
+                    'method' => 'online',
+                    'gateway' => 'razorpay',
+                    'transaction_id' => $razorpayOrder->id,
+                    'status' => 'pending',
+                    'gateway_response' => $razorpayOrder->toArray(),
+                    'notes' => $request->notes ?? null
+                ]);
+            });
 
             return response()->json([
                 'success' => true,
@@ -199,7 +211,7 @@ class PaymentController extends Controller
     }
 
     /**
-     * Verify Razorpay payment
+     * Verify Razorpay payment - OPTIMIZED with locking
      */
     public function verifyRazorpayPayment(Request $request)
     {
@@ -225,48 +237,51 @@ class PaymentController extends Controller
 
             $api->utility->verifyPaymentSignature($attributes);
 
-            DB::beginTransaction();
+            // OPTIMIZATION: Lock payment record to prevent double-processing
+            return DB::transaction(function () use ($request) {
+                $payment = Payment::where('id', $request->payment_id)
+                    ->where('status', 'pending') // Only process pending payments
+                    ->lockForUpdate()
+                    ->firstOrFail();
+                
+                $payment->update([
+                    'status' => 'completed',
+                    'gateway_transaction_id' => $request->razorpay_payment_id,
+                    'paid_at' => now(),
+                    'gateway_response' => array_merge(
+                        $payment->gateway_response ?? [],
+                        [
+                            'payment_id' => $request->razorpay_payment_id,
+                            'signature_verified' => true,
+                            'verified_at' => now()->toDateTimeString()
+                        ]
+                    )
+                ]);
 
-            // Find and update payment
-            $payment = Payment::findOrFail($request->payment_id);
-            
-            $payment->update([
-                'status' => 'completed',
-                'gateway_transaction_id' => $request->razorpay_payment_id,
-                'paid_at' => now(),
-                'gateway_response' => array_merge(
-                    $payment->gateway_response ?? [],
-                    [
-                        'payment_id' => $request->razorpay_payment_id,
-                        'signature_verified' => true,
-                        'verified_at' => now()->toDateTimeString()
-                    ]
-                )
-            ]);
+                // Update order payment status
+                $payment->order->updatePaymentStatus();
+                
+                // Clear caches
+                Cache::forget('dashboard.stats');
+                Cache::forget('dashboard.recent_orders');
 
-            // Update order payment status
-            $payment->order->updatePaymentStatus();
-
-            DB::commit();
-
-            return response()->json([
-                'success' => true,
-                'message' => 'Payment verified successfully!',
-                'redirect_url' => route('orders.show', $payment->order)
-            ]);
+                return response()->json([
+                    'success' => true,
+                    'message' => 'Payment verified successfully!',
+                    'redirect_url' => route('orders.show', $payment->order)
+                ]);
+            });
 
         } catch (\Exception $e) {
-            DB::rollBack();
-            
-            // Mark payment as failed
-            if (isset($payment)) {
-                $payment->update(['status' => 'failed']);
-            }
-
             Log::error('Razorpay payment verification failed', [
                 'error' => $e->getMessage(),
-                'payment_id' => $request->payment_id
+                'payment_id' => $request->payment_id ?? null
             ]);
+
+            // Mark payment as failed only if it exists
+            if (isset($request->payment_id)) {
+                Payment::where('id', $request->payment_id)->update(['status' => 'failed']);
+            }
 
             return response()->json([
                 'success' => false,
@@ -276,7 +291,7 @@ class PaymentController extends Controller
     }
 
     /**
-     * Initiate Razorpay payment
+     * Initiate Razorpay payment - OPTIMIZED
      */
     private function initiateRazorpayPayment($order, $request)
     {
@@ -286,15 +301,15 @@ class PaymentController extends Controller
                 config('services.razorpay.secret')
             );
 
-            // Create Razorpay order
+            $receiptId = $order->order_number . '_' . time();
+            
             $razorpayOrder = $api->order->create([
-                'receipt' => $order->order_number,
-                'amount' => $request->amount * 100, // Convert to paise
+                'receipt' => $receiptId,
+                'amount' => $request->amount * 100,
                 'currency' => 'INR',
                 'payment_capture' => 1
             ]);
 
-            // Create pending payment record
             $payment = $order->recordPayment([
                 'amount' => $request->amount,
                 'method' => 'online',
@@ -305,30 +320,15 @@ class PaymentController extends Controller
                 'notes' => $request->notes
             ]);
 
-            DB::commit();
-
             return view('payments.razorpay', compact('order', 'payment', 'razorpayOrder'));
             
         } catch (\Exception $e) {
-            DB::rollBack();
             throw new \Exception('Razorpay error: ' . $e->getMessage());
         }
     }
 
     /**
-     * Show refund form
-     */
-    public function showRefundForm(Payment $payment)
-    {
-        if (!$payment->isRefundable()) {
-            return back()->with('error', 'This payment cannot be refunded.');
-        }
-
-        return view('payments.refund', compact('payment'));
-    }
-
-    /**
-     * Process refund
+     * Process refund - OPTIMIZED
      */
     public function refund(Request $request, Payment $payment)
     {
@@ -337,99 +337,95 @@ class PaymentController extends Controller
             'reason' => 'required|string|max:500'
         ]);
 
-        DB::beginTransaction();
-
         try {
-            // Handle refund based on gateway
-            if ($payment->gateway === 'razorpay') {
-                $this->processRazorpayRefund($payment, $request);
-            } else {
-                // Manual refund for cash/bank/other
-                $this->processManualRefund($payment, $request);
-            }
+            return DB::transaction(function () use ($payment, $request) {
+                // Handle refund based on gateway
+                if ($payment->gateway === 'razorpay') {
+                    $this->processRazorpayRefund($payment, $request);
+                } else {
+                    $this->processManualRefund($payment, $request);
+                }
+                
+                // Clear caches
+                Cache::forget('dashboard.stats');
+                Cache::forget('dashboard.recent_orders');
 
-            DB::commit();
-            
-            return redirect()->route('orders.show', $payment->order)
-                ->with('success', 'Refund processed successfully!');
+                return redirect()
+                    ->route('orders.show', $payment->order)
+                    ->with('success', 'Refund processed successfully!');
+            });
                 
         } catch (\Exception $e) {
-            DB::rollBack();
-            return back()->with('error', 'Refund failed: ' . $e->getMessage())->withInput();
+            Log::error('Refund processing failed', [
+                'payment_id' => $payment->id,
+                'error' => $e->getMessage()
+            ]);
+            
+            return back()
+                ->with('error', 'Refund failed: ' . $e->getMessage())
+                ->withInput();
         }
     }
 
     /**
-     * Process Razorpay refund
+     * Process Razorpay refund - OPTIMIZED
      */
     private function processRazorpayRefund($payment, $request)
     {
-        try {
-            $api = new Api(
-                config('services.razorpay.key'),
-                config('services.razorpay.secret')
-            );
+        $api = new Api(
+            config('services.razorpay.key'),
+            config('services.razorpay.secret')
+        );
 
-            // Process refund
-            $refund = $api->payment->fetch($payment->gateway_transaction_id)->refund([
-                'amount' => $request->amount * 100,
-                'notes' => ['reason' => $request->reason]
-            ]);
+        $refund = $api->payment->fetch($payment->gateway_transaction_id)->refund([
+            'amount' => $request->amount * 100,
+            'notes' => ['reason' => $request->reason]
+        ]);
 
-            // Update original payment if full refund
-            if ($request->amount == $payment->amount) {
-                $payment->update(['status' => 'refunded']);
-            } else {
-                $payment->update(['status' => 'partially_refunded']);
-            }
-
-            // Create refund record
-            $payment->order->recordPayment([
-                'amount' => -$request->amount,
-                'method' => $payment->method,
-                'gateway' => $payment->gateway,
-                'transaction_id' => 'refund_' . $refund->id,
-                'gateway_transaction_id' => $refund->id,
-                'status' => 'completed',
-                'gateway_response' => $refund->toArray(),
-                'notes' => 'Refund: ' . $request->reason
-            ]);
-
-            // Update order payment status
-            $payment->order->updatePaymentStatus();
-
-        } catch (\Exception $e) {
-            throw new \Exception('Razorpay refund failed: ' . $e->getMessage());
-        }
-    }
-
-    /**
-     * Process manual refund
-     */
-    private function processManualRefund($payment, $request)
-    {
-        // Update original payment status
-        if ($request->amount == $payment->amount) {
-            $payment->update(['status' => 'refunded']);
-        } else {
-            $payment->update(['status' => 'partially_refunded']);
-        }
+        // Update payment status
+        $payment->update([
+            'status' => $request->amount == $payment->amount ? 'refunded' : 'partially_refunded'
+        ]);
 
         // Create refund record
         $payment->order->recordPayment([
-            'amount' => -$request->amount, // Negative amount for refund
+            'amount' => -$request->amount,
             'method' => $payment->method,
             'gateway' => $payment->gateway,
+            'transaction_id' => 'refund_' . $refund->id,
+            'gateway_transaction_id' => $refund->id,
             'status' => 'completed',
-            'notes' => 'Manual Refund: ' . $request->reason
+            'paid_at' => now(),
+            'gateway_response' => $refund->toArray(),
+            'notes' => 'Refund: ' . $request->reason
         ]);
 
-        // Update order payment status
         $payment->order->updatePaymentStatus();
     }
 
     /**
-     * Mark bank transfer as verified
+     * Process manual refund - OPTIMIZED
+     */
+    private function processManualRefund($payment, $request)
+    {
+        $payment->update([
+            'status' => $request->amount == $payment->amount ? 'refunded' : 'partially_refunded'
+        ]);
+
+        $payment->order->recordPayment([
+            'amount' => -$request->amount,
+            'method' => $payment->method,
+            'gateway' => $payment->gateway,
+            'status' => 'completed',
+            'paid_at' => now(),
+            'notes' => 'Manual Refund: ' . $request->reason
+        ]);
+
+        $payment->order->updatePaymentStatus();
+    }
+
+    /**
+     * Verify bank transfer - OPTIMIZED
      */
     public function verifyBankTransfer(Payment $payment)
     {
@@ -445,6 +441,8 @@ class PaymentController extends Controller
             ]);
 
             $payment->order->updatePaymentStatus();
+            
+            Cache::forget('dashboard.stats');
         });
 
         return back()->with('success', 'Bank transfer verified successfully!');

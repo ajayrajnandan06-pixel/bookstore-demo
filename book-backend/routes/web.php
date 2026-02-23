@@ -37,29 +37,17 @@ Route::middleware('auth')->group(function () {
         Route::get('/{order}/invoice', [OrderController::class, 'invoice'])->name('orders.invoice');
         Route::get('/{order}/invoice/download', [OrderController::class, 'downloadInvoice'])->name('orders.invoice.download');
     });
-});
 
-// Test route
-Route::get('/test', function () {
-    return 'Laravel is working!';
-});
-
-// Payment Routes - WITHOUT CSRF FOR SOME ENDPOINTS
-Route::prefix('payments')->name('payments.')->group(function () {
+    // Payment routes are auth-protected for client environments.
+    Route::prefix('payments')->name('payments.')->group(function () {
     // Create payment page
     Route::get('/order/{order}/create', [PaymentController::class, 'create'])->name('create');
     
     // Process payment
     Route::post('/order/{order}', [PaymentController::class, 'store'])->name('store');
-    
-    // Remove these Stripe routes:
-    // Route::get('/stripe/{order}/{payment}/success', [PaymentController::class, 'stripeSuccess'])->name('stripe.success');
-    // Route::get('/stripe/{order}/{payment}/cancel', [PaymentController::class, 'stripeCancel'])->name('stripe.cancel');
-    
-    // Razorpay payment verification - WITHOUT CSRF
+
     Route::post('/razorpay/verify', [PaymentController::class, 'verifyRazorpayPayment'])
-        ->name('razorpay.verify')
-        ->withoutMiddleware(['csrf']);
+        ->name('razorpay.verify');
     
     // Refund routes
     Route::get('/{payment}/refund', [PaymentController::class, 'showRefundForm'])->name('refund.create');
@@ -67,74 +55,68 @@ Route::prefix('payments')->name('payments.')->group(function () {
     
     // Bank transfer verification
     Route::post('/{payment}/verify-bank-transfer', [PaymentController::class, 'verifyBankTransfer'])->name('verify.bank');
+    });
+
+    // AJAX payment endpoints
+    Route::prefix('api/payments')->name('payments.api.')->group(function () {
+        Route::post('/razorpay/{order}/create-order', [PaymentController::class, 'createRazorpayOrder'])
+            ->name('razorpay.create-order');
+    });
 });
 
-// API Payment Endpoints - WITHOUT CSRF
-Route::prefix('api/payments')->name('payments.api.')->group(function () {
-    // REMOVE THIS STRIPE ROUTE:
-    // Route::post('/stripe/{order}/create-intent', [PaymentController::class, 'createStripeIntent'])
-    //     ->name('stripe.create-intent')
-    //     ->withoutMiddleware(['csrf']);
-    
-    Route::post('/razorpay/{order}/create-order', [PaymentController::class, 'createRazorpayOrder'])
-        ->name('razorpay.create-order')
-        ->withoutMiddleware(['csrf']);
-});
+// Development-only routes
+if (app()->environment('local')) {
+    Route::get('/test', function () {
+        return 'Laravel is working!';
+    });
 
-// Razorpay Test Routes
-Route::prefix('razorpay')->name('razorpay.')->group(function () {
-    Route::get('/test/order/{order}', [TestRazorpayController::class, 'testPayment'])->name('test');
-    Route::post('/test/{order}/create-order', [TestRazorpayController::class, 'createOrder'])
-        ->name('create-order')
-        ->withoutMiddleware(['csrf']);
-    
-    Route::post('/verify-payment', [TestRazorpayController::class, 'verifyPayment'])
-        ->name('verify')
-        ->withoutMiddleware(['csrf']);
-    
-    Route::get('/success', [TestRazorpayController::class, 'success'])->name('success');
-    Route::get('/failure', [TestRazorpayController::class, 'failure'])->name('failure');
-    Route::get('/test-cards', [TestRazorpayController::class, 'testCards'])->name('test-cards');
-});
+    Route::middleware('auth')->prefix('razorpay')->name('razorpay.')->group(function () {
+        Route::get('/test/order/{order}', [TestRazorpayController::class, 'testPayment'])->name('test');
+        Route::post('/test/{order}/create-order', [TestRazorpayController::class, 'createOrder'])
+            ->name('create-order');
+        Route::post('/verify-payment', [TestRazorpayController::class, 'verifyPayment'])->name('verify');
+        Route::get('/success', [TestRazorpayController::class, 'success'])->name('success');
+        Route::get('/failure', [TestRazorpayController::class, 'failure'])->name('failure');
+        Route::get('/test-cards', [TestRazorpayController::class, 'testCards'])->name('test-cards');
+    });
+}
 
-// Debug route
-Route::get('/debug-razorpay', function() {
-    $api = new Razorpay\Api\Api(
-        config('services.razorpay.key'),
-        config('services.razorpay.secret')
-    );
-    
-    try {
-        // Test API connection
-        $orders = $api->order->all(['count' => 1]);
-        return response()->json([
-            'success' => true,
-            'message' => 'API connected successfully',
-            'orders' => $orders->items
-        ]);
-    } catch (\Exception $e) {
-        return response()->json([
-            'success' => false,
-            'error' => $e->getMessage(),
-            'key' => config('services.razorpay.key') ? 'Set' : 'Not set',
-            'secret' => config('services.razorpay.secret') ? 'Set' : 'Not set'
-        ], 500);
-    }
-});
+// Debug route intentionally disabled for client-shared environments.
+// It exposes payment gateway configuration state and should not be public.
+// Route::get('/debug-razorpay', function() {
+//     $api = new Razorpay\Api\Api(
+//         config('services.razorpay.key'),
+//         config('services.razorpay.secret')
+//     );
+//
+//     try {
+//         // Test API connection
+//         $orders = $api->order->all(['count' => 1]);
+//         return response()->json([
+//             'success' => true,
+//             'message' => 'API connected successfully',
+//             'orders' => $orders->items
+//         ]);
+//     } catch (\Exception $e) {
+//         return response()->json([
+//             'success' => false,
+//             'error' => $e->getMessage(),
+//             'key' => config('services.razorpay.key') ? 'Set' : 'Not set',
+//             'secret' => config('services.razorpay.secret') ? 'Set' : 'Not set'
+//         ], 500);
+//     }
+// });
 
-use Illuminate\Support\Facades\Artisan;
-
-Route::get('/__setup-now', function () {
-    Artisan::call('optimize:clear');
-    Artisan::call('migrate --force');
-    Artisan::call('db:seed');
-    return 'Migration & seeding done';
-});
-
-
-
-
-Route::get('/__clear', function () {
-    Artisan::call('optimize:clear');
-    return 'Config cleared';
-});
+// Setup routes intentionally disabled for client-shared environments.
+// They run privileged artisan commands and should never be publicly accessible.
+// Route::get('/__setup-now', function () {
+//     Artisan::call('optimize:clear');
+//     Artisan::call('migrate --force');
+//     Artisan::call('db:seed');
+//     return 'Migration & seeding done';
+// });
+//
+// Route::get('/__clear', function () {
+//     Artisan::call('optimize:clear');
+//     return 'Config cleared';
+// });

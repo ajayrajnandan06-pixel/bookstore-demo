@@ -428,6 +428,7 @@
                 const response = await fetch(`/api/payments/razorpay/${orderId}/create-order`, {
                     method: 'POST',
                     headers: {
+                        'Accept': 'application/json',
                         'Content-Type': 'application/json',
                         'X-CSRF-TOKEN': $('meta[name="csrf-token"]').attr('content')
                     },
@@ -437,7 +438,13 @@
                     })
                 });
                 
-                const data = await response.json();
+                const raw = await response.text();
+                let data;
+                try {
+                    data = JSON.parse(raw);
+                } catch (e) {
+                    throw new Error(`Server returned non-JSON response (HTTP ${response.status}).`);
+                }
                 
                 if (!data.success) {
                     throw new Error(data.message || 'Failed to create Razorpay order');
@@ -484,6 +491,7 @@
                 const verifyResponse = await fetch('/payments/razorpay/verify', {
                     method: 'POST',
                     headers: {   
+                        'Accept': 'application/json',
                         'Content-Type': 'application/json',
                         'X-CSRF-TOKEN': $('meta[name="csrf-token"]').attr('content')
                     },
@@ -495,7 +503,13 @@
                     })
                 });
                 
-                const data = await verifyResponse.json();
+                const raw = await verifyResponse.text();
+                let data;
+                try {
+                    data = JSON.parse(raw);
+                } catch (e) {
+                    throw new Error(`Verification endpoint returned non-JSON response (HTTP ${verifyResponse.status}).`);
+                }
                 
                 if (data.success) {
                     // Redirect to order page
