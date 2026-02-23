@@ -1,10 +1,8 @@
 services:
   - type: web
     name: book-store-backend
-    runtime: php
+    env: docker
     rootDir: book-backend
-    buildCommand: composer install --no-interaction --prefer-dist --optimize-autoloader
-    startCommand: php artisan serve --host=0.0.0.0 --port=$PORT
     envVars:
       - key: APP_NAME
         value: book_store
