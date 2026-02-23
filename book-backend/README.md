@@ -113,6 +113,30 @@ php artisan db:seed --force
 
 6. Open the Railway public URL and login.
 
+## Client Deployment (Alternative: Render Blueprint)
+
+This repository now includes `render.yaml` for quick setup.
+
+1. Push latest code to GitHub.
+2. In Render, choose `New` -> `Blueprint`.
+3. Select your repo.
+4. Render will read `render.yaml` and create the web service.
+5. Fill required secret env values in Render:
+   - `APP_KEY`
+   - `APP_URL`
+   - `DB_HOST`
+   - `DB_PORT`
+   - `DB_DATABASE`
+   - `DB_USERNAME`
+   - `DB_PASSWORD`
+6. Run:
+
+```bash
+php artisan migrate --force
+php artisan db:seed --force
+php artisan optimize:clear
+```
+
 ## Quick Public Demo (Fallback)
 
 If you need temporary sharing only, use a tunnel. This is less stable than Railway and may be blocked by corporate firewalls.
